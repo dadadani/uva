@@ -1,0 +1,6 @@
+[submodule "src/fastio/bindings/libuv"]
+	path = src/fastio/bindings/libuv
+	url = https://github.com/libuv/libuv.git
+[submodule "src/uva/private/bindings/libuv"]
+	path = src/uva/private/bindings/libuv
+	url = https://github.com/libuv/libuv.git
