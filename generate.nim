@@ -51,7 +51,7 @@ static:
                 #echo "detected shit"
                 #echo sym.parent
                 #quit(1)
-                #sym.name = sym.name.replace("UV__", "uvx_")
+                sym.name = sym.name.replace("UV__", "UVX_")
     
   cDebug()
   cDisableCaching()
@@ -65,5 +65,8 @@ cIncludeDir(uvPath.parentDir())
 
 #cIncludeDir(uvPath.parentDir().parentDir())
 
-cImport(uvPath)
+cImport(uvPath.parentDir() / "uv" / "errno.h")
+
+#cImport(uvPath)
+
 

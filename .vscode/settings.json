@@ -1,5 +1,7 @@
 {
     "files.associations": {
-        "cerrno": "c"
+        "cerrno": "c",
+        "errno.h": "c",
+        "unix.h": "c"
     }
 }

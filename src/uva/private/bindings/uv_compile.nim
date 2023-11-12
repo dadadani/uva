@@ -1,5 +1,7 @@
 import os
 
+{.used.}
+
 const path = currentSourcePath() / ".." / "libuv"
 
 {.passC: "-I" & path / "src".}
