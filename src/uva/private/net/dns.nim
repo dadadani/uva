@@ -1,75 +1,112 @@
+## Module for resolving hostnames to IP addresses.
+
 import ../utils, ../globals
 import ../bindings/uv
 import std/asyncfutures
+import segfaults
+
+proc c_strlen(a: cstring): csize_t {.importc: "strlen", header: "<string.h>",
+                                     noSideEffect, raises: [], tags: [],
+                                     forbids: [].}
 when defined windows:
     import winlean
 else:
     import posix
 
-proc onResolved(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cdecl.} =
-    if status != 0:
-        echo "Error: ", uv_strerror(status)
-        return
-    echo "Resolved!"
-    var str = newString(17)
-    echo uv_ip4_name(cast[ptr Sockaddr_in](res.ai_addr), addr str[0], 16)
-    echo "IP: ", str
-    uv_freeaddrinfo(res)
-    dealloc(req)
-    
-proc main() = 
-
-    var hints: AddrInfo
-    hints.ai_family = AF_INET
-    hints.ai_socktype = SOCK_STREAM
-    hints.ai_protocol = IPPROTO_TCP
-    hints.ai_flags = 0
-
-    var resolver: uv_getaddrinfo_t
-    echo "Resolving..."
-    let r = uv_getaddrinfo(defaultLoop.loop, addr resolver, onResolved, cstring("irc.libera.chat"), cstring("6667"), addr hints)
-    if r != 0:
-        echo "Error: ", uv_strerror(r)
-        return
-
-    echo $uv_run(defaultLoop.loop, UV_RUN_DEFAULT) 
-
-#main()
-
-
 type PreferredAddrFamily* = enum
     IPv4
     IPv6
     Any
-#Future[tuple[address: string, family: PreferredAddrFamily]] 
-proc resolveAddr*(): void = 
-    #result = newFuture[tuple[address: string, family: PreferredAddrFamily]]("resolveAddr")
+
+proc onResolved(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cdecl.} =
+    let fut = cast[Future[ptr AddrInfo]](req.data)
+    GC_unref(fut)
+    if status != 0:
+        dealloc(req)
+        if not isNil(res):
+            uv_freeaddrinfo(res)
+        fut.fail(returnException(status))
+        return
+    fut.complete(res)
+    dealloc(req)
+
+proc onResolvedStr(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cdecl.} =
+    let fut = cast[Future[tuple[address: string, family: PreferredAddrFamily]]](req.data)
+    GC_unref(fut)
+    if status != 0:
+        dealloc(req)
+        if not isNil(res):
+            uv_freeaddrinfo(res)
+        fut.fail(returnException(status))
+        return
+    if res.ai_family == AF_INET:
+        var address = newString(17)
+        let ck = uv_ip4_name(cast[ptr Sockaddr_in](res.ai_addr), cstring(address), 16)
+        if ck != 0:
+            uv_freeaddrinfo(res)
+            dealloc(req)
+            fut.fail(returnException(ck))
+            return
+        fut.complete((address[0..<c_strlen(cstring(address))], IPv4))
+    else:
+        var address = newString(UV_IF_NAMESIZE)
+        let ck = uv_ip6_name(cast[ptr Sockaddr_in6](res.ai_addr), cstring(address), UV_IF_NAMESIZE)
+        if ck != 0:
+            uv_freeaddrinfo(res)
+            dealloc(req)
+            fut.fail(returnException(ck))
+            return
+        fut.complete((address[0..<c_strlen(cstring(address))], IPv6))
+
+    uv_freeaddrinfo(res)
+    dealloc(req)
+
+
+proc resolveAddr*(hostname: string, family: PreferredAddrFamily = Any): Future[tuple[address: string, family: PreferredAddrFamily]]  = 
+    ## Resolves a hostname to an IP address.
+    ## Returns a tuple of the IP address and the address family (IPv4 or IPv6).
+    ## By default, both IPv4 and IPv6 addresses are returned.
+    result = newFuture[tuple[address: string, family: PreferredAddrFamily]]("resolveAddr")
 
     var hints: AddrInfo
-    #if family == Any:
-     #   hints.ai_family = AF_UNSPEC
-    #elif family == IPv4:
-    #    hints.ai_family = AF_INET
-    #else:
-    #    hints.ai_family = AF_INET6
-
-    hints.ai_family = AF_INET
-    hints.ai_socktype = SOCK_STREAM
-    hints.ai_protocol = IPPROTO_TCP
-    hints.ai_flags = 0
+    if family == Any:
+        hints.ai_family = AF_UNSPEC
+    elif family == IPv4:
+        hints.ai_family = AF_INET
+    else:
+        hints.ai_family = AF_INET6
 
     var resolver: ptr uv_getaddrinfo_t = cast[ptr uv_getaddrinfo_t](alloc(sizeof(uv_getaddrinfo_t)))
-    #GC_ref(result)
-    #resolver.data = cast[pointer](result)
-
-    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolved, cstring("irc.libera.chat"), cstring("6667"), addr hints)
+    GC_ref(result)
+    resolver.data = cast[pointer](result)
+    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolvedStr, hostname, nil, addr hints)
     if r != 0:
         echo "Error: ", uv_strerror(r)
-        #GC_unref(result)
-        #result.fail(returnException(r))
-    echo "r= ", r
-    #result.fail(newException(CatchableError, "c"))
+        GC_unref(result)
+        result.fail(returnException(r))
 
-resolveAddr()
+proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any): Future[ptr AddrInfo] =
+    ## Resolves a hostname to an IP address.
+    ## Returns a pointer to an AddrInfo struct, useful for low level usage of the struct.
+    ## Note: AddrInfo is managed by libuv and must be freed with `uv_freeaddrinfo` after use.
+    result = newFuture[ptr AddrInfo]("resolveAddrPtr")
 
-echo $uv_run(defaultLoop.loop, UV_RUN_DEFAULT)
+    var hints: AddrInfo
+    if family == Any:
+        hints.ai_family = AF_UNSPEC
+    elif family == IPv4:
+        hints.ai_family = AF_INET
+    else:
+        hints.ai_family = AF_INET6
+
+    var resolver: ptr uv_getaddrinfo_t = cast[ptr uv_getaddrinfo_t](alloc(sizeof(uv_getaddrinfo_t)))
+    GC_ref(result)
+    resolver.data = cast[pointer](result)
+    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolved, hostname, nil, addr hints)
+    if r != 0:
+        echo "Error: ", uv_strerror(r)
+        GC_unref(result)
+        result.fail(returnException(r))
+
+
+echo waitFor resolveAddr("localhost", IPv4)

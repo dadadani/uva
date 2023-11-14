@@ -18,9 +18,16 @@ proc xcalloc(nmemb: csize_t; size: csize_t;): pointer {.cdecl.} =
 type UvLoop = object
     loop*: ptr uv_loop_s
 
+proc walkCb(handle: ptr uv_handle_t; arg: pointer) {.cdecl.} =
+    if uv_is_closing(handle) == 0:
+        uv_close(handle, nil)
+
 proc `=destroy`(self: UvLoop) =
     if self.loop != nil:
+        uv_walk(self.loop, walkCb, nil)
+        checkError uv_run(self.loop, UV_RUN_DEFAULT)
         checkError uv_loop_close(self.loop)
+        uv_library_shutdown()
 
 var defaultLoop*: UvLoop
 
@@ -45,8 +52,6 @@ proc runForever*() =
 proc waitFor*[T](fut: Future[T]): T =
     ## Block the current thread and wait for a single task to complete.
     while not fut.finished():
-        echo "waiting: ", isnil defaultLoop.loop
         checkError uv_run(defaultLoop.loop, UV_RUN_ONCE)
-        echo "done waiting"
 
     return fut.read
