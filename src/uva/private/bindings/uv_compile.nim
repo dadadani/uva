@@ -19,6 +19,19 @@ when defined linux:
     {.compile: path / "src" / "unix" / "proctitle.c".}
     {.compile: path / "src" / "unix" / "random-getrandom.c".}
     {.compile: path / "src" / "unix" / "random-sysctl-linux.c".}
+elif defined macosx:
+    {.passC: "-D_DARWIN_USE_64_BIT_INODE=1"}
+    {.passC: "-D_DARWIN_UNLIMITED_SELECT=1"}
+
+    {.passC: "-I" & path / "include/uv/darwin.h".}
+  
+    {.compile: path / "src" / "unix" / "bsd-ifaddrs.c".}
+    {.compile: path / "src" / "unix" / "darwin-proctitle.c".}
+    {.compile: path / "src" / "unix" / "darwin.c".}
+    {.compile: path / "src" / "unix" / "fsevents.c".}
+    {.compile: path / "src" / "unix" / "kqueue.c".}
+    {.compile: path / "src" / "unix" / "proctitle.c".}
+    {.compile: path / "src" / "unix" / "random-getentropy.c".}
 
 
 

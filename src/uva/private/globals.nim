@@ -1,11 +1,12 @@
 import utils
 import bindings/uv
+import std/asyncfutures
 
 proc xmalloc(size: csize_t;): pointer {.cdecl.} =
     return alloc(size)
 
 proc xfree(`ptr`: pointer; ) {.cdecl.} =
-    if `ptr` != nil:
+    if not isNil(`ptr`):
         dealloc(`ptr`)
 
 proc xrealloc(`ptr`: pointer; size: csize_t;): pointer {.cdecl.} =
@@ -34,3 +35,18 @@ proc init() =
 
 
 init()
+
+proc runForever*() = 
+    ## Run the default loop forever.
+    ## Note: This function will never return, even if there are no active handles or requests.
+    while true:
+        checkError uv_run(defaultLoop.loop, UV_RUN_ONCE)
+
+proc waitFor*[T](fut: Future[T]): T =
+    ## Block the current thread and wait for a single task to complete.
+    while not fut.finished():
+        echo "waiting: ", isnil defaultLoop.loop
+        checkError uv_run(defaultLoop.loop, UV_RUN_ONCE)
+        echo "done waiting"
+
+    return fut.read

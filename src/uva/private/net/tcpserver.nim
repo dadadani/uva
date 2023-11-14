@@ -1,5 +1,7 @@
 import ../utils, ../globals
-import ../bindings/uv
+import ../bindings/uv, std/strutils
+
+import asyncfutures, asyncmacro
 from nativesockets import Port
 
 type TCPServer = ref object
@@ -8,85 +10,113 @@ type TCPServer = ref object
     server: uv_tcp_t
     store: string
 
-
-proc allocCb(handle: ptr uv_handle_t; suggested_size: uint; buf: ptr uv_buf_t) {.cdecl.} =
-    let nvc = "test"
-    echo "isnil chk: ", isNil(handle.data)
-    
-    echo "allocCb"
+proc allocBuffer(handle: ptr uv_handle_t; suggested_size: uint; buf: ptr uv_buf_t) {.cdecl.} =
     buf.base = cast[ptr cchar](alloc(suggested_size))
     buf.len = suggested_size
 
 proc onClose(handle: ptr uv_handle_t) {.cdecl.} =
-    echo "onClose"
     dealloc(handle)
 
-proc readCb(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.} =
-    try:
-        echo "x: ", nread
-    except:
-        echo "error, ", getCurrentExceptionMsg()
-
-    echo "isnil chk1: ", isNil(stream.data)
-    echo "get ", cast[TCPServer](stream.data).store
-
-    echo "readCb"
-    echo nread
-    if nread < 0:
+proc readCb(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.} = 
+    if nread > 0:
+        echo "Read: ", nread
+        echo ($buf.base)[0..<nread]
+    elif nread < 0:
         if nread == UV_EOF:
             echo "EOF"
-            uv_close(cast[ptr uv_handle_t](stream), onClose)
-        else:
-            echo "read error: ", nread
-        checkError cint(nread)
-        echo "read error"
-    else:
-        echo "read: ", nread
-        let r = $buf.base
-        echo "read: ", r[0..<nread]
+            return
+        echo "Error on read: ", nread
+        uv_close(cast[ptr uv_handle_t](stream), onClose)
+        checkError(cint(nread))
     
     dealloc(buf.base)
 
-proc onConnection(server: ptr uv_stream_t; status: cint) {.cdecl.} =
-    try:
-        checkError status
 
-        echo "connection accepted"
+proc socketRead(client: ptr uv_tcp_t): Future[string] {.gcsafe.} = 
+    result = newFuture[string]("socketRead")
+    GC_ref(result)
+    client.data = cast[pointer](result)
+    proc allocBufferx(handle: ptr uv_handle_t; suggested_size: uint; buf: ptr uv_buf_t) {.cdecl.} =
+        buf.base = cast[ptr cchar](alloc(suggested_size))
+        buf.len = suggested_size
 
-        let connection = cast[ptr uv_tcp_t](alloc(sizeof(uv_tcp_t)))
-        
-        connection.data = server.data
+    proc readCbx(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl, gcsafe.} = 
+        let future = cast[Future[string]](stream.data)
+        GC_unref(future)
+        if nread < 0:
+            if nread == UV_EOF:
+                future.complete("")
+                return
+            uv_close(cast[ptr uv_handle_t](stream), onClose)
+            future.fail(returnException(cint(nread)))
+            return
+        let err = uv_read_stop(stream)
+        if err < 0:
+            future.fail(returnException(err))
+            return
+        #future.fail(newException(CatchableError, "test"))
+        future.complete(($buf.base)[0..<nread])
+        dealloc(buf.base)
 
-        checkError uv_tcp_init(defaultLoop.loop, connection)
-        checkError uv_tcp_init(defaultLoop.loop, connection)
+    let err = uv_read_start(cast[ptr uv_stream_t](client), allocBufferx, readCbx)
+    if err < 0:
+        result.fail(returnException(err))
 
-        let chk = uv_accept(server, cast[ptr uv_stream_t](connection))
-        if chk == 0:
-            checkError uv_read_start(cast[ptr uv_stream_t](connection), allocCb, readCb)
-        else:
-            uv_close(cast[ptr uv_handle_t](connection), onClose)
-    except:
-        echo "error onConnection: ", getCurrentExceptionMsg()
-        raise
-proc bindTCPServer(host: string, port: Port): TCPServer =
-    result = new(TCPServer)
-    result.store = "test"
-    result.port = port
+proc readty(client: ptr uv_tcp_t) {.async.} =
+    while true:
+        echo "trying to read"
+        let read = await socketRead(client)
+        echo "Read: ", read
+        if read.contains("stop"):
+            var x: ptr uv_handle_t = cast[ptr uv_handle_t](client.data)
+            uv_close(cast[ptr uv_handle_t](client), onClose)
+            uv_close(cast[ptr uv_handle_t](x), onClose)
+            uv_stop(defaultLoop.loop)
+            
+            checkError uv_loop_close(defaultLoop.loop)
 
-    checkError uv_tcp_init(defaultLoop.loop, addr result.server)
+proc onNewConnection(server: ptr uv_stream_t; status: cint) {.cdecl.} = 
+    if (status < 0):
+        echo "Error on new connection: ", status
+        checkError(status)
+        return
 
-    checkError uv_ip4_addr(cstring(host), cint(port), addr result.host) 
+    var client: ptr uv_tcp_t = cast[ptr uv_tcp_t](alloc(sizeof(uv_tcp_t)))
+    client.data = server
+    checkError uv_tcp_init(defaultLoop.loop, client)
+    let err = uv_accept(server, cast[ptr uv_stream_t](client))
+    
+    if err < 0:
+        echo "Error on accept: ", err
+        uv_close(cast[ptr uv_handle_t](client), onClose)
+        checkError(err)
+        return
+    else:
+        asyncCheck readty(client)
+        #checkError uv_read_start(cast[ptr uv_stream_t](client), allocBuffer, readCb)
 
-    checkError uv_tcp_bind(addr result.server, cast[ptr SockAddr](addr result.host), 0)
 
-    checkError uv_listen(cast[ptr uv_stream_t](addr result.server), 128, onConnection)
 
-    result.server.data = cast[pointer](result)
+proc main() = 
+    var server: uv_tcp_t
+    checkError uv_tcp_init(defaultLoop.loop, addr server)
 
-    echo "listening on port ", int(port)
+    var adr: Sockaddr_in
 
-echo "isnil: ", isnil(defaultLoop.loop)
+    checkError uv_ip4_addr("0.0.0.0", 3534, addr adr)
 
-let server = bindTCPServer("0.0.0.0", 3534.Port)
+    checkError uv_tcp_bind(addr server, cast[ptr SockAddr](addr adr), 0)
 
-checkError uv_run(defaultLoop.loop, UV_RUN_DEFAULT)
+    checkError uv_listen(cast[ptr uv_stream_t](addr server), 128, onNewConnection)
+
+    while true:
+        let x = uv_run(defaultLoop.loop, UV_RUN_ONCE)
+        echo "uv_run err: ", x
+        checkError x
+
+
+ 
+
+ 
+
+main()
