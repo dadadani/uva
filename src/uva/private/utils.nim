@@ -13,7 +13,8 @@ proc returnException*(code: cint): ref UvError =
 proc checkError*(code: cint) =
   ## Checks the given code and raises an exception if it is not 0.
   if code < 0:
-    echo code
-
     raise returnException(code)
     #raise newException(Defect, "sus")
+
+
+  

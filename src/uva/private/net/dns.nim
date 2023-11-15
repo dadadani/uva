@@ -81,16 +81,16 @@ proc resolveAddr*(hostname: string, family: PreferredAddrFamily = Any): Future[t
     resolver.data = cast[pointer](result)
     let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolvedStr, hostname, nil, addr hints)
     if r != 0:
-        echo "Error: ", uv_strerror(r)
         GC_unref(result)
         result.fail(returnException(r))
 
 proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any): Future[ptr AddrInfo] =
     ## Resolves a hostname to an IP address.
+    ##
     ## Returns a pointer to an AddrInfo struct, useful for low level usage of the struct.
+    ##
     ## Note: AddrInfo is managed by libuv and must be freed with `uv_freeaddrinfo` after use.
     result = newFuture[ptr AddrInfo]("resolveAddrPtr")
-
     var hints: AddrInfo
     if family == Any:
         hints.ai_family = AF_UNSPEC
@@ -104,9 +104,10 @@ proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any): Futur
     resolver.data = cast[pointer](result)
     let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolved, hostname, nil, addr hints)
     if r != 0:
-        echo "Error: ", uv_strerror(r)
         GC_unref(result)
         result.fail(returnException(r))
 
 
-echo waitFor resolveAddr("localhost", IPv4)
+waitFor sleepAsync(1000)
+
+#echo waitFor resolveAddr("localhost", IPv6)

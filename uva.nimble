@@ -2,7 +2,7 @@
 
 version       = "0.1.0"
 author        = "Daniele"
-description   = "Asynchronous library based on libuv for Nim"
+description   = "I/O library based on libuv for Nim"
 license       = "MIT"
 srcDir        = "src"
 
