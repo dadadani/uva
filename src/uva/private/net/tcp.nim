@@ -9,175 +9,207 @@ when defined windows:
 else: 
     import posix
 
-type TCPServer = object
-    host: Sockaddr_in
-    port: Port
-    server: uv_tcp_t
-    store: string
-
-proc allocBuffer(handle: ptr uv_handle_t; suggested_size: uint; buf: ptr uv_buf_t) {.cdecl.} =
-    buf.base = cast[ptr cchar](alloc(suggested_size))
-    buf.len = suggested_size
+type TCPConnection* = object
+    stream: ptr uv_stream_t
 
 proc onClose(handle: ptr uv_handle_t) {.cdecl.} =
+    echo "Connection closed!"
     dealloc(handle)
 
-proc readCb(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.} = 
+
+proc onWrite(req: ptr uv_write_t; status: cint) {.cdecl.} = 
+    if status < 0:
+        raise newException(UVError, "uv_write failed: " & $uv_strerror(status))
+
+    dealloc(req)
+
+proc onAlloc(handle: ptr uv_handle_t; suggested_size: uint; buf: ptr uv_buf_t) {.cdecl.} =
+    buf[] = uv_buf_init(cast[cstring](alloc(suggested_size)), cuint(suggested_size))
+
+proc onRead(stream: ptr uv_stream_t; nread: culong; buf: ptr uv_buf_t) {.cdecl.} =
     if nread > 0:
-        echo "Read: ", nread
-        echo ($buf.base)[0..<nread]
-    elif nread < 0:
-        if nread == UV_EOF:
-            echo "EOF"
-            return
-        echo "Error on read: ", nread
+        echo "Received: ", buf.base
+        dealloc(buf.base)
+    else:
+        dealloc(buf.base)
         uv_close(cast[ptr uv_handle_t](stream), onClose)
-        checkError(cint(nread))
-    
-    dealloc(buf.base)
 
-proc onNewConnection(server: ptr uv_stream_t; status: cint) {.cdecl.} = 
-    if (status < 0):
-        echo "Error on new connection: ", status
-        checkError(status)
-        return
+proc write*(stream: ptr uv_stream_t, data: string) =
+    var writer = create(uv_write_t, sizeof(uv_write_t))
 
-    #var client: ptr uv_tcp_t = cast[ptr uv_tcp_t](alloc(sizeof(uv_tcp_t)))
-    var client = new uv_tcp_t
-    GC_ref(client)
-    checkError uv_tcp_init(defaultLoop.loop, cast[ptr uv_tcp_t](client))
-    let err = uv_accept(server, cast[ptr uv_stream_t](client))
-    if err < 0:
-        echo "Error on accept: ", err
-        uv_close(cast[ptr uv_handle_t](client), onClose)
-        checkError(err)
-        return
-    else:
-        checkError uv_read_start(cast[ptr uv_stream_t](client), allocBuffer, readCb)
+    let buffer = [
+        uv_buf_t(
+            base: cstring(data),
+            len: uint(data.len)
+        )
+    ]
 
-proc newTCPServer*(): TCPServer =
-
-    checkError uv_tcp_init(defaultLoop.loop, addr result.server)
-
-
-proc listen*(server: TCPServer, host: sink string, port: Port): Future[void] {.async.} =
-
-    # first, try to parse the host as an ipv4
-
-    var ip: SockAddr
-    var ainfo: ptr AddrInfo
-    var err = uv_ip4_addr(cstring(host), cint(port), cast[ptr Sockaddr_in](addr ip))
+    let err = uv_write(writer, stream, cast[UncheckedArray[uv_buf_t]](buffer), 1, onWrite)
     if err != 0:
-        var host = host # copy, for some reason without it the variable stops working. TODO: investigate
-        # try ipv6
-        err = uv_ip6_addr(cstring(host), cint(port), cast[ptr Sockaddr_in6](addr ip))
-        if err != 0:
-            # try to resolve the host
-            ainfo = await resolveAddrPtr(host)
+        raise newException(UVError, "uv_write failed: " & $uv_strerror(err))     
+
+proc onConnect(req: ptr uv_connect_t, status: cint) {.cdecl.} = 
+    let stream = req.handle
+    dealloc(req)
+
+    if status < 0:
+        uv_close(cast[ptr uv_handle_t](stream), onClose)
+        echo "Connection failed: ", uv_strerror(status)
+        return
+        #raise newException(UVError, "uv_tcp_connect failed: " & $uv_strerror(status))
+        
     
-    if not isNil(ainfo):
-        checkError uv_tcp_bind(addr server.server, ainfo.ai_addr, 0)
-        uv_freeaddrinfo(ainfo)
-    else:
-        checkError uv_tcp_bind(addr server.server, cast[ptr SockAddr](addr ip), 0) 
+    echo "Connected!"
 
-    checkError uv_listen(cast[ptr uv_stream_t](addr server.server), 128, onNewConnection)
+    write(stream, "GET / HTTP/1.1\n\n\n\n")
+    let err = uv_read_start(stream, onAlloc, onRead)
+    if err != 0:
+        raise newException(UVError, "uv_read_start failed: " & $uv_strerror(err))
+    
 
+proc connect(hostname: string, port: Port) =
 
+    var dest: Sockaddr_in
+    var err = uv_ip4_addr(cstring(hostname), cint(port), addr dest)
+    if err != 0:
+        raise newException(UVError, "uv_ip4_addr failed: " & $uv_strerror(err))
+    
+    
+    let socket = create(uv_tcp_t, sizeof(uv_tcp_t))
 
-proc main() = 
-    var server: uv_tcp_t
-    checkError uv_tcp_init(defaultLoop.loop, addr server)
-
-    var adr: Sockaddr_in
-
-    checkError uv_ip4_addr("0.0.0.0", 3534, addr adr)
-
-    checkError uv_tcp_bind(addr server, cast[ptr SockAddr](addr adr), 0)
-
-    checkError uv_listen(cast[ptr uv_stream_t](addr server), 128, onNewConnection)
-
-    checkError uv_run(defaultLoop.loop, UV_RUN_DEFAULT)
-
-
-let sock = newTCPServer()
-waitFor sock.listen("localhost", 3534.Port)
-echo "Listening on"
-runForever()
-#main()
+    err = uv_tcp_init(defaultLoop.loop, socket)
+    if err != 0:
+        dealloc(socket)
+        raise newException(UVError, "uv_tcp_init failed: " & $uv_strerror(err))
 
 
-type TCPConnection = ref object
-    handle: ref uv_tcp_t
-    connection: ref uv_connect_t
+    let connection = create(uv_connect_t, sizeof(uv_connect_t))
+    err = uv_tcp_connect(connection, socket, cast[ptr Sockaddr](addr dest), onConnect)
+    if err != 0:
+        dealloc(socket)
+        dealloc(connection)
+        raise newException(UVError, "uv_tcp_connect failed: " & $uv_strerror(err))
 
-proc onConnect(req: ptr uv_connect_t; status: cint) {.cdecl.} =
-    let fut = cast[Future[TCPConnection]](req.data)
-    let ctx = cast[TCPConnection](req.handle.data)
-    if status != 0:
-        uv_close(cast[ptr uv_handle_t](ctx.handle), onClose)
+proc resolveaddr(hostname: string, port: Port, dest: ptr Sockaddr_in): cint = 
+    result = uv_ip4_addr(cstring(hostname), cint(port), dest)
+
+type FailContext = ref object
+    future: Future[TCPConnection]
+    exception: ref Exception
+
+proc onCloseFail(handle: ptr uv_handle_t) {.cdecl.} =
+    let ctx = cast[FailContext](handle.data)
+    GC_unref(ctx)
+    dealloc(handle)
+    ctx.future.fail(ctx.exception)
+
+proc tcpConnectionOnWrite(req: ptr uv_write_t; status: cint) {.cdecl.} = 
+    let fut = cast[Future[void]](req.data)
+    GC_unref(fut)
+    if status < 0:
+        dealloc(req)
         fut.fail(returnException(status))
         return
-    fut.complete(ctx)
 
-proc dial*(host: string, port: Port): Future[TCPConnection] =
-    echo "1"
-    result = newFuture[TCPConnection]("dial")
-    echo "2"
 
-    var futaddr = addr result
-    echo "3"
+    dealloc(req)
+    fut.complete()
 
-    let self = new TCPConnection
-    echo "4"
-    self.handle = new uv_tcp_t
-    echo "5"
-    self.connection = new uv_connect_t
-    echo "6"
-    var err = uv_tcp_init(defaultLoop.loop, cast[ptr uv_tcp_t](self.handle))
-    echo "7"
+proc write*(connection: TCPConnection, data: string): Future[void] = 
+    result = newFuture[void]("TCPConnection.write")
+    var writer = create(uv_write_t, sizeof(uv_write_t))
+    GC_ref(result)
+    writer.data = cast[pointer](result)
+    let buffer = [
+        uv_buf_t(
+            base: cstring(data),
+            len: uint(data.len)
+        )
+    ]
+
+    #GC_unref(result)
+    #dealloc(writer)
+    #result.fail(newException(Exception, "test"))
+    #return
+
+    let err = uv_write(writer, connection.stream, cast[UncheckedArray[uv_buf_t]](buffer), 1, tcpConnectionOnWrite)
     if err != 0:
-        echo "8"
+        GC_unref(result)
+        dealloc(writer)
+        result.fail(returnException(err))
+
+        
+
+proc tcpConnectionOnConnect(req: ptr uv_connect_t, status: cint) {.cdecl.} = 
+    let fut = cast[Future[TCPConnection]](req.data)
+    GC_unref(fut)
+    let stream = req.handle
+    dealloc(req)
+    
+    if status < 0:
+        let fail = FailContext(future: fut, exception: returnException(status))
+        GC_ref(fail)
+        stream.data = cast[pointer](fail)
+        uv_close(cast[ptr uv_handle_t](stream), onCloseFail)
+        return
+
+
+    let err = uv_read_start(stream, onAlloc, onRead)
+    if err != 0:
+        let fail = FailContext(future: fut, exception: returnException(err))
+        GC_ref(fail)
+        stream.data = cast[pointer](fail)
+        uv_close(cast[ptr uv_handle_t](stream), onCloseFail)
+        return
+
+    let res = TCPConnection(stream: stream)
+    fut.complete(res)
+
+
+
+
+proc dial*(hostname: string, port: Port): Future[TCPConnection] =
+    result = newFuture[TCPConnection]("dial")
+    
+    var dest: Sockaddr_in
+
+    var err = resolveaddr(hostname, port, addr dest)
+    if err != 0:
         result.fail(returnException(err))
         return
 
-    # first, try to parse the host as an ipv4
-    echo "9"
-    var ip: SockAddr
-    echo "10"
-    #var ainfo: ptr AddrInfo
-    err = uv_ip4_addr(cstring(host), cint(port), cast[ptr Sockaddr_in](addr ip))
+    let socket = create(uv_tcp_t, sizeof(uv_tcp_t))
+
+    err = uv_tcp_init(defaultLoop.loop, socket)
     if err != 0:
-        echo "11"
-        var host = host # copy, for some reason without it the variable stops working. TODO: investigate
-        # try ipv6
-        echo "12"
-        err = uv_ip6_addr(cstring(host), cint(port), cast[ptr Sockaddr_in6](addr ip))
-        echo "13"
-        if err != 0:
-            # try to resolve the host
-            #ainfo = await resolveAddrPtr(host)
-            echo "14"
-            resolveAddrPtr(host).callback = proc (ip: Future[ptr AddrInfo]) =
-                    echo "16"
-                    let ainfo = ip.read
-                    echo "17"
-                    err = uv_tcp_connect(cast[ptr uv_connect_t](self.connection), cast[ptr uv_tcp_t](self.handle), ainfo.ai_addr, onConnect)
-                    echo "18"
-                    uv_freeaddrinfo(ainfo)
-                    uv_close(cast[ptr uv_handle_t](self.handle), onClose)
-                    echo "19"
-                    if err != 0:
-                        echo "20"
-                        futaddr[].fail(returnException(err))
-            echo "15"
-            return
-    self.handle.data = cast[pointer](self)
-    self.connection.data = cast[pointer](result)
+        dealloc(socket)
+        result.fail(returnException(err))
+        return
 
-    checkError uv_tcp_connect(cast[ptr uv_connect_t](self.connection), cast[ptr uv_tcp_t](self.handle), cast[ptr SockAddr](addr ip), onConnect) 
+    let connection = create(uv_connect_t, sizeof(uv_connect_t))
+    GC_ref(result)
+    connection.data = cast[pointer](result)
+    err = uv_tcp_connect(connection, socket, cast[ptr Sockaddr](addr dest), tcpConnectionOnConnect)
+    if err != 0:
+        dealloc(socket)
+        dealloc(connection)
+        GC_unref(result)
+        result.fail(returnException(err))
+        return
+    
 
-           
-asyncCheck dial("google.com", 80.Port)
-asyncCheck sleepAsync(5000)
+
+proc test() {.async.} =
+    try:
+        let connection = await dial("127.0.0.1", 8000.Port)
+        await connection.write("GET / HTTP/1.1\n\n\n\n")
+    except:
+        echo "Error!"
+        raise
+        
+
+for i in 0..3000:
+    asyncCheck test()
+
+
 runForever()

@@ -19,6 +19,7 @@ type PreferredAddrFamily* = enum
     Any
 
 proc onResolved(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cdecl.} =
+    echo "onResolved called"
     let fut = cast[Future[ptr AddrInfo]](req.data)
     GC_unref(fut)
     if status != 0:
@@ -27,7 +28,9 @@ proc onResolved(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cd
             uv_freeaddrinfo(res)
         fut.fail(returnException(status))
         return
+    echo "onResolved completed"
     fut.complete(res)
+    echo "onResolved freed"
     dealloc(req)
 
 proc onResolvedStr(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cdecl.} =
@@ -102,12 +105,13 @@ proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any): Futur
     var resolver: ptr uv_getaddrinfo_t = cast[ptr uv_getaddrinfo_t](alloc(sizeof(uv_getaddrinfo_t)))
     GC_ref(result)
     resolver.data = cast[pointer](result)
+    echo "resolving"
     let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolved, hostname, nil, addr hints)
     if r != 0:
+        echo "failed"
         GC_unref(result)
         result.fail(returnException(r))
 
 
-waitFor sleepAsync(1000)
 
 #echo waitFor resolveAddr("localhost", IPv6)

@@ -24,6 +24,7 @@ proc walkCb(handle: ptr uv_handle_t; arg: pointer) {.cdecl.} =
 
 proc `=destroy`(self: UvLoop) =
     if self.loop != nil:
+        discard
         uv_walk(self.loop, walkCb, nil)
         checkError uv_run(self.loop, UV_RUN_DEFAULT)
         checkError uv_loop_close(self.loop)
@@ -45,8 +46,11 @@ init()
 
 proc runForever*() = 
     ## Run the default loop forever.
-    while true:
-        checkError uv_run(defaultLoop.loop, UV_RUN_ONCE)
+    ## Exits when there are active tasks.
+    var code = cint(1)
+    while code == 1:
+        code = uv_run(defaultLoop.loop, UV_RUN_DEFAULT)
+        checkError code
 
 proc waitFor*[T](fut: Future[T]): T =
     ## Block the current thread and wait for a single task to complete.
