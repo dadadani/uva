@@ -19,7 +19,6 @@ type PreferredAddrFamily* = enum
     Any
 
 proc onResolved(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cdecl.} =
-    echo "onResolved called"
     let fut = cast[Future[ptr AddrInfo]](req.data)
     GC_unref(fut)
     if status != 0:
@@ -28,9 +27,7 @@ proc onResolved(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cd
             uv_freeaddrinfo(res)
         fut.fail(returnException(status))
         return
-    echo "onResolved completed"
     fut.complete(res)
-    echo "onResolved freed"
     dealloc(req)
 
 proc onResolvedStr(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {.cdecl.} =
@@ -65,9 +62,11 @@ proc onResolvedStr(req: ptr uv_getaddrinfo_t; status: cint; res: ptr AddrInfo) {
     dealloc(req)
 
 
-proc resolveAddr*(hostname: string, family: PreferredAddrFamily = Any): Future[tuple[address: string, family: PreferredAddrFamily]]  = 
+proc resolveAddr*(hostname: string, family: PreferredAddrFamily = Any, service = ""): Future[tuple[address: string, family: PreferredAddrFamily]]  = 
     ## Resolves a hostname to an IP address.
+    ## 
     ## Returns a tuple of the IP address and the address family (IPv4 or IPv6).
+    ## 
     ## By default, both IPv4 and IPv6 addresses are returned.
     result = newFuture[tuple[address: string, family: PreferredAddrFamily]]("resolveAddr")
 
@@ -82,12 +81,12 @@ proc resolveAddr*(hostname: string, family: PreferredAddrFamily = Any): Future[t
     var resolver: ptr uv_getaddrinfo_t = cast[ptr uv_getaddrinfo_t](alloc(sizeof(uv_getaddrinfo_t)))
     GC_ref(result)
     resolver.data = cast[pointer](result)
-    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolvedStr, hostname, nil, addr hints)
+    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolvedStr, hostname, service, addr hints)
     if r != 0:
         GC_unref(result)
         result.fail(returnException(r))
 
-proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any): Future[ptr AddrInfo] =
+proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any, service = ""): Future[ptr AddrInfo] =
     ## Resolves a hostname to an IP address.
     ##
     ## Returns a pointer to an AddrInfo struct, useful for low level usage of the struct.
@@ -106,12 +105,9 @@ proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any): Futur
     GC_ref(result)
     resolver.data = cast[pointer](result)
     echo "resolving"
-    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolved, hostname, nil, addr hints)
+    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolved, hostname, service, addr hints)
     if r != 0:
         echo "failed"
         GC_unref(result)
         result.fail(returnException(r))
 
-
-
-#echo waitFor resolveAddr("localhost", IPv6)
