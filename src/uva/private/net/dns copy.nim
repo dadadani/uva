@@ -24,11 +24,11 @@ proc main() =
 
     var resolver: uv_getaddrinfo_t
     echo "Resolving..."
-    let r = uv_getaddrinfo(defaultLoop.loop, addr resolver, onResolved, cstring("irc.libera.chat"), cstring("6667"), addr hints)
+    let r = uv_getaddrinfo(getLoop().loop, addr resolver, onResolved, cstring("irc.libera.chat"), cstring("6667"), addr hints)
     if r != 0:
         echo "Error: ", uv_strerror(r)
         return
 
-    echo $uv_run(defaultLoop.loop, UV_RUN_DEFAULT) 
+    echo $uv_run(getLoop().loop, UV_RUN_DEFAULT) 
 
 main()

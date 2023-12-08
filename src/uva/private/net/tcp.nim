@@ -35,14 +35,13 @@ proc onConnectImpl(req: ptr uv_connect_t, status: cint) =
         )
 
         return
-    
     fut.complete(self)
 
 proc onConnect(req: ptr uv_connect_t, status: cint) {.cdecl.} = 
     try:
         onConnectImpl(req, status)
     except:
-        uv_stop(defaultLoop.loop)
+        uv_stop(getLoop().loop)
         raise
 
 proc `nodelay=`*(self: TCP, value: bool) =
@@ -57,7 +56,7 @@ proc dial*(hostname: string, port: Port, family = PreferredAddrFamily.Any, buffe
     GC_ref(result)
     var resultaddr = cast[pointer](result)
 
-    resolveAddrPtr(hostname, family, $port).addCallback proc (fut: Future[ptr AddrInfo]) =
+    resolveAddrPtr(hostname, family, $port).addCallback proc (fut: Future[ptr AddrInfo]) {.gcsafe.} =
         let result = cast[Future[TCP]](resultaddr)
         GC_unref(result)
         if fut.failed:
@@ -71,7 +70,7 @@ proc dial*(hostname: string, port: Port, family = PreferredAddrFamily.Any, buffe
         GC_ref(self)
         socket.data = cast[pointer](self)
 
-        var err = uv_tcp_init(defaultLoop.loop, socket)
+        var err = uv_tcp_init(getLoop().loop, socket)
         if err != 0:
             dealloc(socket)
             result.fail(returnException(err))
@@ -94,16 +93,18 @@ proc test() {.async.} =
     #echo "a:", await resolveAddr("127.0.0.1")
     let con = await dial("127.0.0.1", 8000.Port)
     echo "Connected!"
-    await con.write("GET / HTTP/1.1\n\n\n\n")
+    await con.send("GET / HTTP/1.1\n\n\n\n")
     echo "Written!"
-    let xx = await con.read(65570)
+    var data = newString(1024)
+    let read = await con.recvInto(addr data[0], data.len)
 
-    echo xx
-    echo "xx len: ", xx.len
+    echo data
+    echo "xx len: ", data.len
 
     echo "Done!"
     await con.close()
     #await con.write("test")
 when isMainModule:
-    asyncCheck test()
+    for i in 0..100:
+        asyncCheck test()
     runForever()

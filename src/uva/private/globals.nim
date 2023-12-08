@@ -1,6 +1,7 @@
 import utils
 import bindings/uv
 import std/asyncfutures
+import std/deques
 
 proc xmalloc(size: csize_t;): pointer {.cdecl.} =
     return alloc(size)
@@ -15,14 +16,19 @@ proc xrealloc(`ptr`: pointer; size: csize_t;): pointer {.cdecl.} =
 proc xcalloc(nmemb: csize_t; size: csize_t;): pointer {.cdecl.} =
     return alloc0(nmemb * size)
 
-type UvLoop = object
-    loop*: ptr uv_loop_s
+type 
+    UvLoopObj = object
+        loop*: ptr uv_loop_s
+        callbacks*: Deque[proc () {.gcsafe.}]
+
+    UvLoop = ref UvLoopObj
+
 
 proc walkCb(handle: ptr uv_handle_t; arg: pointer) {.cdecl.} =
     if uv_is_closing(handle) == 0:
         uv_close(handle, nil)
 
-proc `=destroy`(self: UvLoop) =
+proc `=destroy`(self: UvLoopObj) =
     if self.loop != nil:
         uv_walk(self.loop, walkCb, nil)
         discard uv_run(self.loop, UV_RUN_DEFAULT)
@@ -31,29 +37,56 @@ proc `=destroy`(self: UvLoop) =
 
 var defaultLoop*: UvLoop
 
+proc vcallSoon*(cbproc: proc () {.gcsafe.}) {.gcsafe.}
+
 proc init() =
 
+    defaultLoop = new UvLoop
     # Replace the default allocators with Nim's allocators.
     # This guarantees better compatibility and faster performance.
     checkError uv_replace_allocator(xmalloc, xrealloc, xcalloc, xfree)
 
     # Initialize the default loop.
     defaultLoop.loop = uv_default_loop()
+    defaultLoop.callbacks = initDeque[proc () {.gcsafe.}]()
+
+    setCallSoonProc(vcallSoon)
 
 
 init()
 
-proc runForever*() = 
-    ## Run the default loop forever.
-    ## Exits when there are active tasks.
-    var code = cint(1)
-    while code == 1:
-        code = uv_run(defaultLoop.loop, UV_RUN_DEFAULT)
-        checkError code
 
-proc waitFor*[T](fut: Future[T]): T =
+proc getLoop*(): UvLoop =
+    {.gcsafe.}:
+        return defaultloop
+
+proc vcallSoon*(cbproc: proc () {.gcsafe.}) =
+    getLoop().callbacks.addLast(cbproc)
+
+proc processCallbacks() =
+    while getLoop().callbacks.len > 0:
+        let cb = getLoop().callbacks.popFirst()
+        cb()
+
+proc runOnce*(): bool =
+    ## Run the default loop once.
+    ## Returns when there are no active tasks.
+    var code = uv_run(getLoop().loop, UV_RUN_ONCE)
+    checkError code
+    processCallbacks()
+    return code == 1
+
+
+proc runForever*() {.gcsafe.} = 
+    ## Run the default loop forever.
+    while true:
+        discard runOnce()
+
+        
+
+proc waitFor*[T](fut: Future[T]): T {.gcsafe.} =
     ## Block the current thread and wait for a single task to complete.
     while not fut.finished():
-        checkError uv_run(defaultLoop.loop, UV_RUN_ONCE)
+        discard runOnce()
     
     fut.read

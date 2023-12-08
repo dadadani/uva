@@ -1,7 +1,7 @@
 import ../utils, ../globals
 import ../bindings/uv
 import std/net, std/asyncmacro, std/asyncfutures
-import dns
+import resolveaddr
 from nativesockets import Port
 
 when defined windows:
@@ -75,7 +75,7 @@ proc connect(hostname: string, port: Port) =
     
     let socket = create(uv_tcp_t, sizeof(uv_tcp_t))
 
-    err = uv_tcp_init(defaultLoop.loop, socket)
+    err = uv_tcp_init(getLoop().loop, socket)
     if err != 0:
         dealloc(socket)
         raise newException(UVError, "uv_tcp_init failed: " & $uv_strerror(err))

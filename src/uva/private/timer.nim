@@ -17,7 +17,7 @@ proc sleepAsync*(timeout: uint): Future[void] =
   result = newFuture[void]()
   let timer = new uv_timer_t
   
-  var err = uv_timer_init(defaultLoop.loop, cast[ptr uv_timer_t](timer))
+  var err = uv_timer_init(getLoop().loop, cast[ptr uv_timer_t](timer))
 
   if err != 0:
     result.fail(returnException(err))

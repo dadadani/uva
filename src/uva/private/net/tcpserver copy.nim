@@ -36,7 +36,7 @@ proc onNewConnection(server: ptr uv_stream_t; status: cint) {.cdecl.} =
         return
 
     var client: ptr uv_tcp_t = cast[ptr uv_tcp_t](alloc(sizeof(uv_tcp_t)))
-    checkError uv_tcp_init(defaultLoop.loop, client)
+    checkError uv_tcp_init(getLoop().loop, client)
     let err = uv_accept(server, cast[ptr uv_stream_t](client))
     if err < 0:
         echo "Error on accept: ", err
@@ -48,7 +48,7 @@ proc onNewConnection(server: ptr uv_stream_t; status: cint) {.cdecl.} =
 
 proc main() = 
     var server: uv_tcp_t
-    checkError uv_tcp_init(defaultLoop.loop, addr server)
+    checkError uv_tcp_init(getLoop().loop, addr server)
 
     var adr: Sockaddr_in
 
@@ -58,6 +58,6 @@ proc main() =
 
     checkError uv_listen(cast[ptr uv_stream_t](addr server), 128, onNewConnection)
 
-    checkError uv_run(defaultLoop.loop, UV_RUN_DEFAULT)
+    checkError uv_run(getLoop().loop, UV_RUN_DEFAULT)
 
 main()

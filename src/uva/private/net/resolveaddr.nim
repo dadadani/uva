@@ -81,7 +81,7 @@ proc resolveAddr*(hostname: string, family: PreferredAddrFamily = Any, service =
     var resolver: ptr uv_getaddrinfo_t = cast[ptr uv_getaddrinfo_t](alloc(sizeof(uv_getaddrinfo_t)))
     GC_ref(result)
     resolver.data = cast[pointer](result)
-    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolvedStr, hostname, service, addr hints)
+    let r = uv_getaddrinfo(getLoop().loop, resolver, onResolvedStr, hostname, service, addr hints)
     if r != 0:
         GC_unref(result)
         result.fail(returnException(r))
@@ -105,7 +105,7 @@ proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any, servic
     GC_ref(result)
     resolver.data = cast[pointer](result)
     echo "resolving"
-    let r = uv_getaddrinfo(defaultLoop.loop, resolver, onResolved, hostname, service, addr hints)
+    let r = uv_getaddrinfo(getLoop().loop, resolver, onResolved, hostname, service, addr hints)
     if r != 0:
         echo "failed"
         GC_unref(result)
