@@ -20,6 +20,7 @@ type
     UvLoopObj = object
         loop*: ptr uv_loop_s
         callbacks*: Deque[proc () {.gcsafe.}]
+        check*: uv_prepare_t
 
     UvLoop = ref UvLoopObj
 
@@ -30,6 +31,7 @@ proc walkCb(handle: ptr uv_handle_t; arg: pointer) {.cdecl.} =
 
 proc `=destroy`(self: UvLoopObj) =
     if self.loop != nil:
+        
         uv_walk(self.loop, walkCb, nil)
         discard uv_run(self.loop, UV_RUN_DEFAULT)
         discard uv_loop_close(self.loop)
@@ -38,6 +40,8 @@ proc `=destroy`(self: UvLoopObj) =
 var defaultLoop*: UvLoop
 
 proc vcallSoon*(cbproc: proc () {.gcsafe.}) {.gcsafe.}
+
+proc processCallbacks() 
 
 proc init() =
 
@@ -51,6 +55,14 @@ proc init() =
     defaultLoop.callbacks = initDeque[proc () {.gcsafe.}]()
 
     setCallSoonProc(vcallSoon)
+    checkError uv_prepare_init(defaultLoop.loop, addr defaultLoop.check)
+ 
+    defaultLoop.check.data = cast[pointer](defaultLoop)
+
+    proc idleCb(handle: ptr uv_prepare_t) {.cdecl.} =
+        processCallbacks()
+
+    checkError uv_prepare_start(addr defaultLoop.check, idleCb)
 
 
 init()
@@ -66,21 +78,27 @@ proc vcallSoon*(cbproc: proc () {.gcsafe.}) =
 proc processCallbacks() =
     while getLoop().callbacks.len > 0:
         let cb = getLoop().callbacks.popFirst()
-        cb()
+        try:
+            cb()
+        except:
+            {.gcsafe.}:
+                uv_stop(getLoop().loop)
+            raise
 
 proc runOnce*(): bool =
     ## Run the default loop once.
     ## Returns when there are no active tasks.
     var code = uv_run(getLoop().loop, UV_RUN_ONCE)
     checkError code
-    processCallbacks()
     return code == 1
 
 
 proc runForever*() {.gcsafe.} = 
     ## Run the default loop forever.
-    while true:
-        discard runOnce()
+    var code = cint(1)
+    while code >= 1:
+        code = uv_run(getLoop().loop, UV_RUN_DEFAULT)
+        checkError code
 
         
 

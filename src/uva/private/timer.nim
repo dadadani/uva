@@ -11,26 +11,28 @@ proc sleepAsync*(timeout: uint): Future[void] =
     GC_unref(fut)
     discard uv_timer_stop(handle)
     uv_close(cast[ptr uv_handle_t](handle), nil)
+    dealloc(handle)
     fut.complete()
 
 
   result = newFuture[void]()
-  let timer = new uv_timer_t
+  let timer = create(uv_timer_t, sizeof(uv_timer_t))
   
-  var err = uv_timer_init(getLoop().loop, cast[ptr uv_timer_t](timer))
+  var err = uv_timer_init(getLoop().loop, timer)
 
   if err != 0:
     result.fail(returnException(err))
     uv_close(cast[ptr uv_handle_t](timer), nil)
+    dealloc(timer)
   
   timer.data = cast[pointer](result)
   GC_ref(result)
 
-  err = uv_timer_start(cast[ptr uv_timer_t](timer), onTimeout, timeout, 0)
+  err = uv_timer_start(timer, onTimeout, timeout, 0)
   if err != 0:
     result.fail(returnException(err))
     uv_close(cast[ptr uv_handle_t](timer), nil)
-
+    dealloc(timer)
 
 
 

@@ -11,11 +11,11 @@ type Handle* = ref object of RootObj
 proc isActive*(handle: Handle): bool =
     ## Returns `true` if the handle is active, `false` otherwise.
     ## An active handle is one that is running some kind of operation.
-    return uv_is_active(handle.handle) != 0
+    return uv_is_active(handle.handle) == 1
 
 proc isClosed*(handle: Handle): bool =
     ## Returns `true` if the handle is closed or is closing, `false` otherwise.
-    return uv_is_closing(handle.handle) != 0
+    return uv_is_closing(handle.handle) == 1 or handle.handle == nil
 
 proc readBufferSize*(handle: Handle): cint =
     ## Returns the size of the read buffer.

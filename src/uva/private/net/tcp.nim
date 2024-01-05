@@ -8,41 +8,41 @@ import ../handles
 import std/importutils
 
 from nativesockets import Port
-
+export Port
 when defined windows:
     import winlean
 else: 
     import posix
 
 type TCP* = ref object of Stream
+ 
+type 
+    TCPServer* = ref object of TCP
+        callback: NewConnectionCallback
+    NewConnectionCallback* = proc(server: TCPServer): Future[void]
 
-type TCPServer* = distinct TCP
-
-proc onConnectImpl(req: ptr uv_connect_t, status: cint) =
+proc onConnect(req: ptr uv_connect_t, status: cint) {.cdecl, used.} = 
     let fut = cast[Future[TCP]](req.data)
     GC_unref(fut)
     let self = cast[TCP](req.handle.data)
-    #GC_unref(self)
     let handle = req.handle
     dealloc(req)
 
     privateAccess(Handle)
     self.handle = cast[ptr uv_handle_s](handle)
-    
+
     if status < 0:
         self.close().addCallback(proc () = 
             fut.fail(returnException(status))
+            uv_stop(getLoop().loop)
         )
 
         return
     fut.complete(self)
+    privateAccess(Stream)
+    if not self.buffered:
+        self.beginRead()
 
-proc onConnect(req: ptr uv_connect_t, status: cint) {.cdecl.} = 
-    try:
-        onConnectImpl(req, status)
-    except:
-        uv_stop(getLoop().loop)
-        raise
 
 proc `nodelay=`*(self: TCP, value: bool) =
     ## Enable/disable Nagle's algorithm.
@@ -51,7 +51,113 @@ proc `nodelay=`*(self: TCP, value: bool) =
     if err != 0:
         raise returnException(err)
 
-proc dial*(hostname: string, port: Port, family = PreferredAddrFamily.Any, buffered = true): Future[TCP] =
+proc `keepalive=`*(self: TCP, delay: int) =
+    ## Set the keep alive delay, in seconds. -1 to disable.
+    privateAccess(Handle)
+    if delay < 0:
+        let err = uv_tcp_keepalive(cast[ptr uv_tcp_t](self.handle), 0, 0)
+        if err != 0:
+            raise returnException(err)
+        return
+    else:
+        let err = uv_tcp_keepalive(cast[ptr uv_tcp_t](self.handle), 1, delay.cuint)
+        if err != 0:
+            raise returnException(err)
+
+proc `simultaneousAccepts=`*(self: TCP, enable: bool) =
+    ## Enable / disable simultaneous asynchronous accept requests that are queued by the operating system when listening for new TCP connections.
+    privateAccess(Handle)
+    let err = uv_tcp_simultaneous_accepts(cast[ptr uv_tcp_t](self.handle), enable.cint)
+    if err != 0:
+        raise returnException(err)
+
+proc server*(hostname: string, port: Port, family = PreferredAddrFamily.Any): Future[TCPServer] =
+    ## Create a new TCP server and bind it to the specified address and port.
+    result = newFuture[TCPServer]("bind")
+    GC_ref(result)
+    var resultaddr = cast[pointer](result)
+
+    resolveAddrPtr(hostname, family, $port).addCallback proc (fut: Future[ptr AddrInfo]) {.gcsafe.} =
+        let result = cast[Future[TCPServer]](resultaddr)
+        GC_unref(result)
+        if fut.failed:
+            result.fail(fut.error)
+            return
+        let dest = fut.read
+        privateAccess(Stream)
+
+        let self = TCPServer()
+        let socket = create(uv_tcp_t, sizeof(uv_tcp_t))
+        GC_ref(self)
+        socket.data = cast[pointer](self)
+
+        var err = uv_tcp_init(getLoop().loop, socket)
+        if err != 0:
+            dealloc(socket)
+            result.fail(returnException(err))
+            return
+
+        err = uv_tcp_bind(socket, dest.ai_addr, 0)
+        uv_freeaddrinfo(dest)
+        if err != 0:
+            dealloc(socket)
+            result.fail(returnException(err))
+            return
+
+        privateAccess(Handle)
+        self.handle = cast[ptr uv_handle_s](socket)
+        
+        result.complete(self)
+
+        
+
+proc accept*(server: TCPServer, buffered = true, readCallback: ReadCallback = nil): TCP =
+    ## Accept incoming connections on a server.
+    ## If the connection is accepted after receiving the callback, it is guaranteed that the function will complete successfully.
+    ## Calling this function multiple times may return errors.
+    privateAccess(Stream)
+    result = TCP(buffered: buffered)
+
+    if not buffered:
+        if isNil(readCallback):
+            raise newException(Exception, "readCallback must be set if buffered is false")
+        result.readCallback = readCallback
+
+    privateAccess(Handle)
+    result.handle = cast[ptr uv_handle_s](create(uv_tcp_t, sizeof(uv_tcp_t)))
+    var err = uv_tcp_init(getLoop().loop, cast[ptr uv_tcp_t](result.handle))
+    if err != 0:
+        dealloc(result.handle)
+        raise returnException(err)
+    result.handle.data = cast[pointer](result)
+    GC_ref(result)
+
+    err = uv_accept(cast[ptr uv_stream_t](server.handle), cast[ptr uv_stream_t](result.handle))
+    if err != 0:
+        uv_close(cast[ptr uv_handle_t](result.handle), nil)
+        dealloc(result.handle)
+        raise returnException(err)
+
+    if not buffered:
+        result.beginRead()
+
+proc serverOnConnection(server: ptr uv_stream_t; status: cint) {.cdecl.} = 
+    let self = cast[TCPServer](server.data)
+    if status < 0:
+        raise returnException(status)
+    asyncCheck self.callback(self)
+
+proc listen*(server: TCPServer, newConnectionCallback: NewConnectionCallback) =
+    ## Start listening for incoming connections.
+    privateAccess(Handle)
+    let err = uv_listen(cast[ptr uv_stream_t](server.handle), 128, serverOnConnection)
+    if err != 0:
+        raise returnException(err)
+    server.callback = newConnectionCallback
+
+proc dial*(hostname: string, port: Port, family = PreferredAddrFamily.Any, buffered = true, readCallback: ReadCallback = nil): Future[TCP] =
+    ## Create a new TCP connection and attempt to establish a connection to the specified address and port.
+    ## When disabling buffered mode, the readCallback must be set.
     result = newFuture[TCP]("dial")
     GC_ref(result)
     var resultaddr = cast[pointer](result)
@@ -66,7 +172,15 @@ proc dial*(hostname: string, port: Port, family = PreferredAddrFamily.Any, buffe
         privateAccess(Stream)
 
         let self = TCP(buffered: buffered)
+        if not buffered:
+            if isNil(readCallback):
+                result.fail(newException(Exception, "readCallback must be set if buffered is false"))
+            self.readCallback = readCallback
+
         let socket = create(uv_tcp_t, sizeof(uv_tcp_t))
+        privateAccess(Handle)
+
+        self.handle = cast[ptr uv_handle_s](socket)
         GC_ref(self)
         socket.data = cast[pointer](self)
 
@@ -77,6 +191,7 @@ proc dial*(hostname: string, port: Port, family = PreferredAddrFamily.Any, buffe
             return
 
         let connection = create(uv_connect_t, sizeof(uv_connect_t))
+
         GC_ref(result)
         connection.data = cast[pointer](result)
 
@@ -88,23 +203,3 @@ proc dial*(hostname: string, port: Port, family = PreferredAddrFamily.Any, buffe
             GC_unref(result)
             result.fail(returnException(err))
             return
-
-proc test() {.async.} =
-    #echo "a:", await resolveAddr("127.0.0.1")
-    let con = await dial("127.0.0.1", 8000.Port)
-    echo "Connected!"
-    await con.send("GET / HTTP/1.1\n\n\n\n")
-    echo "Written!"
-    var data = newString(1024)
-    let read = await con.recvInto(addr data[0], data.len)
-
-    echo data
-    echo "xx len: ", data.len
-
-    echo "Done!"
-    await con.close()
-    #await con.write("test")
-when isMainModule:
-    for i in 0..100:
-        asyncCheck test()
-    runForever()
