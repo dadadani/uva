@@ -1,5 +1,4 @@
 import bindings/uv
-import globals
 import handles
 import std/importutils
 import std/asyncfutures
@@ -8,7 +7,6 @@ import utils
 
 type 
     Stream* = ref object of Handle
-        buffered: bool
         reportClosed: bool
 
         currentReadSize: int
@@ -17,30 +15,23 @@ type
         readCallbackPtr: Future[int]
         readPointer: pointer
         readPointerSize: int
-        readCallback: ReadCallback
-
-    ReadCallback* = proc (data: string): Future[void]
 
 proc close*(connection: Stream): Future[void] 
 
 proc isActive*(connection: Stream): bool =
     ## Returns true if the stream is active.
     privateAccess(Handle)
-    result = uv_is_active(cast[ptr uv_handle_t](connection.handle)) != 0 and not connection.reportClosed
+    result = uv_is_active(cast[ptr uv_handle_t](connection.handle.handle)) != 0 and not connection.reportClosed
 
 proc isReadable*(connection: Stream): bool =
     ## Returns true if the stream is readable.
     privateAccess(Handle)
-    result = uv_is_readable(cast[ptr uv_stream_t](connection.handle)) != 0
+    result = uv_is_readable(cast[ptr uv_stream_t](connection.handle.handle)) != 0
 
 proc isWritable*(connection: Stream): bool =
     ## Returns true if the stream is writable.
     privateAccess(Handle)
-    result = uv_is_writable(cast[ptr uv_stream_t](connection.handle)) != 0
-
-proc isBuffered*(connection: Stream): bool =
-    ## Returns true if the stream is buffered.
-    result = connection.buffered
+    result = uv_is_writable(cast[ptr uv_stream_t](connection.handle.handle)) != 0
 
 # --- Write ---
 
@@ -74,7 +65,7 @@ proc send*(connection: Stream, buf: pointer, size: int): Future[void] =
     ]
 
     privateAccess(Handle)
-    let err = uv_write(writer, cast[ptr uv_stream_t](connection.handle), cast[UncheckedArray[uv_buf_t]](buffer), 1, onWrite)
+    let err = uv_write(writer, cast[ptr uv_stream_t](connection.handle.handle), cast[UncheckedArray[uv_buf_t]](buffer), 1, onWrite)
     if err < 0:
         dealloc(writer)
         GC_unref(result)
@@ -100,7 +91,7 @@ proc send*(connection: Stream, data: sink string): Future[void] =
     ]
 
     privateAccess(Handle)
-    let err = uv_write(writer, cast[ptr uv_stream_t](connection.handle), cast[UncheckedArray[uv_buf_t]](buffer), 1, onWrite)
+    let err = uv_write(writer, cast[ptr uv_stream_t](connection.handle.handle), cast[UncheckedArray[uv_buf_t]](buffer), 1, onWrite)
     if err < 0:
         dealloc(writer)
         GC_unref(result)
@@ -132,7 +123,7 @@ proc onReadPtr(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.}
             discard uv_read_stop(stream)
             return
 
-    if ctx.currentReadSize > 0: ctx.currentReadSize += nread
+    if ctx.currentReadSize >= 0: ctx.currentReadSize += nread
     if ctx.currentReadSize == -1 or ctx.currentReadSize >= ctx.currentReadSize:
         if ctx.currentReadSize == -1:
             ctx.readBuffer.setLen(nread)
@@ -142,14 +133,11 @@ proc onReadPtr(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.}
 
 proc onReadStrAllocStr(handle: ptr uv_handle_t; suggested_size: uint; buf: ptr uv_buf_t) {.cdecl.} =
     let ctx = cast[Stream](handle.data)
-    if not ctx.buffered:
-        ctx.readBuffer.setLen(suggested_size)
-        buf[] = uv_buf_init(cstring(cast[string](ctx.readBuffer)), cuint(suggested_size))
+
+    if ctx.currentReadSize == -1:
+        buf[] = uv_buf_init(cast[cstring](cast[uint](addr (ctx.readBuffer)[0])), cuint(ctx.readBuffer.len))
     else:
-        if ctx.currentReadSize == -1:
-            buf[] = uv_buf_init(cast[cstring](cast[uint](addr (ctx.readBuffer)[0])), cuint(ctx.readBuffer.len))
-        else:
-            buf[] = uv_buf_init(cast[cstring](cast[uint](addr (ctx.readBuffer)[0])+uint(ctx.currentReadSize)), cuint(ctx.readBuffer.len-ctx.currentReadSize))
+        buf[] = uv_buf_init(cast[cstring](cast[uint](addr (ctx.readBuffer)[0])+uint(ctx.currentReadSize)), cuint(ctx.readBuffer.len-ctx.currentReadSize))
 
         
 proc onReadStr(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.} =
@@ -157,14 +145,13 @@ proc onReadStr(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.}
 
     if nread < 0:
         if nread == UV_EOF:
-            ctx.readBuffer.setLen(ctx.currentReadSize)
+            if ctx.currentReadSize >= 0:
+                ctx.readBuffer.setLen(ctx.currentReadSize)
+            else:
+                ctx.readBuffer.setLen(0)
             discard uv_read_stop(stream)
             asyncCheck ctx.close()
-            if ctx.buffered:
-                ctx.readCallbackStr.complete(cast[string](move(ctx.readBuffer)))
-            else:
-                if ctx.readCallback != nil:
-                    asyncCheck ctx.readCallback(cast[string](move(ctx.readBuffer)))
+            ctx.readCallbackStr.complete(cast[string](move(ctx.readBuffer)))
 
             return
         else:
@@ -173,14 +160,8 @@ proc onReadStr(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.}
             discard uv_read_stop(stream)
             return
 
-    if not ctx.buffered:
-        if ctx.readCallback != nil:
-            ctx.readBuffer.setLen(nread)
-            asyncCheck ctx.readCallback(cast[string](move(ctx.readBuffer)))
-
-        return
-    else:
-        if ctx.currentReadSize > 0: 
+    block:
+        if ctx.currentReadSize >= 0: 
             ctx.currentReadSize += nread
         if ctx.currentReadSize == -1 or ctx.currentReadSize >= ctx.readBuffer.len:
             if ctx.currentReadSize == -1:
@@ -193,20 +174,17 @@ proc onReadStr(stream: ptr uv_stream_t; nread: int; buf: ptr uv_buf_t) {.cdecl.}
 proc recvSingle*(connection: Stream, size: int): Future[string] =
     ## Read up to `size` bytes from the stream.
     ## Does not guarantee that the returned string is at least `size` bytes long.
-    ## Note: This procedure may only be called if the connection is set to buffered mode.
     result = newFuture[string]("recvSingle")
     if connection.isClosed:
-        result.fail(newException(EOFError, "Stream is closed"))
+        result.complete("")
         return result
-    if not connection.buffered:
-        result.fail(newException(FieldDefect, "Stream is not buffered"))
-        return result
+
     connection.currentReadSize = 0
     connection.readBuffer.setLen(size)
     connection.currentReadSize = -1
     privateAccess(Handle)
     connection.readCallbackStr = result
-    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle), onReadStrAllocStr, onReadStr)
+    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle.handle), onReadStrAllocStr, onReadStr)
     if err != 0:
         result.fail(returnException(err))
         return
@@ -214,14 +192,11 @@ proc recvSingle*(connection: Stream, size: int): Future[string] =
 proc recvIntoSingle*(connection: Stream, buf: pointer, size: int): Future[int] =
     ## Read up to `size` bytes from the stream into `buf`.
     ## Does not guarantee that the returned string is at least `size` bytes long.
-    ## Note: This procedure may only be called if the connection is set to buffered mode.
     result = newFuture[int]("recvIntoSingle")
     if connection.isClosed:
-        result.fail(newException(EOFError, "Stream is closed"))
+        result.complete(0)
         return result
-    if not connection.buffered:
-        result.fail(newException(FieldDefect, "Stream is not buffered"))
-        return result
+
     connection.currentReadSize = 0
     connection.readBuffer.setLen(0)
     connection.readPointer = buf
@@ -229,7 +204,7 @@ proc recvIntoSingle*(connection: Stream, buf: pointer, size: int): Future[int] =
     connection.currentReadSize = -1
     privateAccess(Handle)
     connection.readCallbackPtr = result
-    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle), onReadStrAllocPtr, onReadPtr)
+    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle.handle), onReadStrAllocPtr, onReadPtr)
     if err != 0:
         result.fail(returnException(err))
         return
@@ -238,33 +213,27 @@ proc recvIntoSingle*(connection: Stream, buf: pointer, size: int): Future[int] =
 proc recv*(connection: Stream, size: int): Future[string] =
     ## Read up to `size` bytes from the stream.
     ## Tries to guarantee that the returned string is at least `size` bytes long.
-    ## Note: This procedure may only be called if the connection is set to buffered mode.
     result = newFuture[string]("recv")
     if connection.isClosed:
-        result.fail(newException(EOFError, "Stream is closed"))
+        result.complete("")
         return result
-    if not connection.buffered:
-        result.fail(newException(FieldDefect, "Stream is not buffered"))
-        return result
+
     connection.currentReadSize = 0
     connection.readBuffer.setLen(size)
     privateAccess(Handle)
     connection.readCallbackStr = result
-    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle), onReadStrAllocStr, onReadStr)
+    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle.handle), onReadStrAllocStr, onReadStr)
     if err != 0:
         result.fail(returnException(err))
         return
 
 proc recvInto*(connection: Stream, buf: pointer, size: int): Future[int] =
     ## Read up to `size` bytes from the stream into `buf`.
-    ## Note: This procedure may only be called if the connection is set to buffered mode.
     result = newFuture[int]("recvInto")
     if connection.isClosed:
-        result.fail(newException(EOFError, "Stream is closed"))
+        result.complete(0)
         return result
-    if not connection.buffered:
-        result.fail(newException(FieldDefect, "Stream is not buffered"))
-        return result
+
 
     connection.currentReadSize = 0
     connection.readBuffer.setLen(0)
@@ -273,35 +242,10 @@ proc recvInto*(connection: Stream, buf: pointer, size: int): Future[int] =
     privateAccess(Handle)
 
     connection.readCallbackPtr = result
-    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle), onReadStrAllocPtr, onReadPtr)
+    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle.handle), onReadStrAllocPtr, onReadPtr)
     if err != 0:
         result.fail(returnException(err))
         return
-
-
-proc beginRead*(connection: Stream) =
-    ## Begin reading from the stream.
-    ## Note: This procedure may only be called if the connection is not set to buffered mode.
-    if connection.isClosed:
-        return
-    if connection.buffered:
-        raise newException(FieldDefect, "Stream is buffered")
-    privateAccess(Handle)
-    let err = uv_read_start(cast[ptr uv_stream_t](connection.handle), onReadStrAllocStr, onReadStr)
-    if err != 0:
-        raise returnException(err)
-
-proc stopRead*(connection: Stream) =
-    ## Stop reading from the stream.
-    ## Note: This procedure may only be called if the connection is not set to buffered mode.
-    if connection.isClosed:
-        return
-    if connection.buffered:
-        raise newException(FieldDefect, "Stream is buffered")
-    privateAccess(Handle)
-    let err = uv_read_stop(cast[ptr uv_stream_t](connection.handle))
-    if err != 0:
-        raise returnException(err)
 
 
 # --- Shutdown ---
@@ -322,7 +266,10 @@ proc onShutdown(req: ptr uv_shutdown_t; status: cint) {.cdecl.} =
     let handle = cast[ptr uv_handle_t](req.handle)
 
     let ctx = cast[Stream](handle.data)
-    GC_unref(ctx)
+    if ctx.readCallbackStr != nil and not ctx.readCallbackStr.finished:
+        ctx.readCallbackStr.complete("")
+    if ctx.readCallbackPtr != nil and not ctx.readCallbackPtr.finished:
+        ctx.readCallbackPtr.complete(0)
 
     handle.data = cast[pointer](fut)
 
@@ -339,8 +286,9 @@ proc close*(connection: Stream): Future[void] =
     GC_ref(result)
     let shutdown = create(uv_shutdown_t, sizeof(uv_shutdown_t))
     shutdown.data = cast[pointer](result)
-
-    let err = uv_shutdown(shutdown, cast[ptr uv_stream_t](connection.handle), onShutdown)
+    let handle = connection.handle.handle
+    connection.handle.handle = nil
+    let err = uv_shutdown(shutdown, cast[ptr uv_stream_t](handle), onShutdown)
     if err != 0:
         dealloc(shutdown)
         result.fail(returnException(err))

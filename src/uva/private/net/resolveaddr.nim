@@ -13,6 +13,9 @@ when defined windows:
 else:
     import posix
 
+export AddrInfo
+export uv_freeaddrinfo
+
 type PreferredAddrFamily* = enum
     IPv4
     IPv6
@@ -107,7 +110,6 @@ proc resolveAddrPtr*(hostname: string, family: PreferredAddrFamily = Any, servic
     resolver.data = cast[pointer](result)
     let r = uv_getaddrinfo(getLoop().loop, resolver, onResolved, hostname, service, addr hints)
     if r != 0:
-        echo "failed"
         GC_unref(result)
         result.fail(returnException(r))
 
