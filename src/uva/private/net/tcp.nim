@@ -18,8 +18,10 @@ type TCP* = ref object of Stream
  
 type 
     TCPServer* = ref object of TCP
-        callback: NewConnectionCallback
-    NewConnectionCallback* = proc(server: TCPServer): Future[void]
+        pendingIncoming: int = 0
+        incomingFuture: Future[void]
+        #callback: NewConnectionCallback
+    #NewConnectionCallback* = proc(server: TCPServer): Future[void]
 
 proc onConnect(req: ptr uv_connect_t, status: cint) {.cdecl, used.} = 
     let fut = cast[Future[TCP]](req.data)
@@ -37,10 +39,9 @@ proc onConnect(req: ptr uv_connect_t, status: cint) {.cdecl, used.} =
             fut.fail(returnException(status))
             uv_stop(getLoop().loop)
         )
-
         return
     fut.complete(self)
-    privateAccess(Stream)
+    
 
 
 
@@ -110,42 +111,58 @@ proc server*(hostname: string, port: Port, family = PreferredAddrFamily.Any): Fu
         result.complete(self)
 
 
-proc accept*(server: TCPServer): TCP =
-    ## Accept incoming connections on a server.
-    ## If the connection is accepted after receiving the callback, it is guaranteed that the function will complete successfully.
-    ## Calling this function multiple times may return errors.
-    privateAccess(Stream)
-    result = TCP()
+proc accept*(server: TCPServer): Future[TCP] {.async.} =
+    ## Accepts incoming connections on a server and returns a TCP handle.
+    ## If there are no pending connections, the returned Future will not be completed until a new connection is available.
+    
+    if server.pendingIncoming > 0:
+        dec server.pendingIncoming
+        
+        privateAccess(Stream)
+        result = TCP()
 
 
-    privateAccess(Handle)
-    result.handle.handle = cast[ptr uv_handle_s](create(uv_tcp_t, sizeof(uv_tcp_t)))
-    var err = uv_tcp_init(getLoop().loop, cast[ptr uv_tcp_t](result.handle))
-    if err != 0:
-        dealloc(result.handle.handle)
-        raise returnException(err)
-    result.handle.handle.data = cast[pointer](result)
-    GC_ref(result)
+        privateAccess(Handle)
+        result.handle.handle = cast[ptr uv_handle_s](create(uv_tcp_t, sizeof(uv_tcp_t)))
+        var err = uv_tcp_init(getLoop().loop, cast[ptr uv_tcp_t](result.handle))
+        if err != 0:
+            dealloc(result.handle.handle)
+            raise returnException(err)
+        result.handle.handle.data = cast[pointer](result)
+        #GC_ref(result)
 
-    err = uv_accept(cast[ptr uv_stream_t](server.handle), cast[ptr uv_stream_t](result.handle))
-    if err != 0:
-        uv_close(cast[ptr uv_handle_t](result.handle), nil)
-        dealloc(result.handle.handle)
-        raise returnException(err)
+        err = uv_accept(cast[ptr uv_stream_t](server.handle), cast[ptr uv_stream_t](result.handle))
+        if err != 0:
+            uv_close(cast[ptr uv_handle_t](result.handle), nil)
+            dealloc(result.handle.handle)
+            raise returnException(err)
+    else:
+        if (isNil server.incomingFuture) or server.incomingFuture.finished:
+            server.incomingFuture = newFuture[void]("incomingFuture:accept")
+        await server.incomingFuture
+        result = await accept(server)
 
 proc serverOnConnection(server: ptr uv_stream_t; status: cint) {.cdecl.} = 
     let self = cast[TCPServer](server.data)
     if status < 0:
-        raise returnException(status)
-    asyncCheck self.callback(self)
+        if (not isNil self.incomingFuture) and not self.incomingFuture.finished:
+            self.incomingFuture.fail(returnException(status))
+        return
+        #raise returnException(status)
+    inc self.pendingIncoming 
+    if (not isNil self.incomingFuture) and not self.incomingFuture.finished:
+        self.incomingFuture.complete()
+       
+    
+    #asyncCheck self.callback(self)
 
-proc listen*(server: TCPServer, newConnectionCallback: NewConnectionCallback) =
+proc listen*(server: TCPServer) =
     ## Start listening for incoming connections.
     privateAccess(Handle)
     let err = uv_listen(cast[ptr uv_stream_t](server.handle), 128, serverOnConnection)
     if err != 0:
         raise returnException(err)
-    server.callback = newConnectionCallback
+    #server.callback = newConnectionCallback
 
 proc dial*(dest: ptr AddrInfo): Future[TCP] = 
     ## Create a new TCP connection and attempt to establish a connection to the specified AddrInfo.
@@ -157,6 +174,8 @@ proc dial*(dest: ptr AddrInfo): Future[TCP] =
 
     let socket = create(uv_tcp_t, sizeof(uv_tcp_t))
     privateAccess(Handle)
+
+    self.handle = HandleHolder()
 
     self.handle.handle = cast[ptr uv_handle_s](socket)
     GC_ref(self)
@@ -236,7 +255,54 @@ proc dial*(hostname: string, port: Port, family = PreferredAddrFamily.Any): Futu
     let resolv = await resolveAddrPtr(hostname, family, $port)
     try:
         result = await dial(resolv)
-    except:
-        raise
     finally:
         uv_freeaddrinfo(resolv)
+
+proc request*(self: TCP) {.async.} =
+    while true:
+        let r = await self.recv(1)
+        if r.len == 0:
+            echo "closed"
+            #await self.close()
+            break
+        echo r
+
+#[
+proc tcpServerTest*() {.async.} =
+    let server = await server("127.0.0.1", 1234.Port)
+    server.listen()
+    echo "listening"
+
+    while true:
+        let client = await server.accept()
+        echo "accepted"
+        asyncCheck client.request()
+        echo "closed"
+    
+when isMainModule:
+    asyncCheck tcpServerTest()
+    runForever()]#
+
+proc tcpClientTest*() =
+    echo "dialing"
+    dial("0.0.0.0", 8000.Port).addCallback(proc (c: Future[TCP]) = 
+        echo "dialed"
+        asyncCheck c.read.send("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+        echo "sent"
+        asyncCheck c.read.close()
+    )
+
+
+
+    ##echo "dialed"
+    ##await client.send("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+   # echo "sent"
+    
+    
+
+
+when isMainModule:
+    import ../timer
+    tcpClientTest()
+    tcpClientTest()
+    waitFor sleepAsync(1000)

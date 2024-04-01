@@ -91,6 +91,7 @@ proc send*(connection: Stream, data: sink string): Future[void] =
     ]
 
     privateAccess(Handle)
+    echo "sending uv_write"
     let err = uv_write(writer, cast[ptr uv_stream_t](connection.handle.handle), cast[UncheckedArray[uv_buf_t]](buffer), 1, onWrite)
     if err < 0:
         dealloc(writer)

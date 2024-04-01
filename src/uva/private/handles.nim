@@ -2,10 +2,13 @@ import bindings/uv
 import utils
 
 
-type HandleHolder = object 
-    handle*: ptr uv_handle_t
+type 
+    HandleHolderObj = object 
+        handle*: ptr uv_handle_t
 
-proc `=destroy`(x: HandleHolder)
+    HandleHolder* = ref HandleHolderObj
+
+proc `=destroy`(x: HandleHolderObj)
 
 type Handle* = ref object of RootObj
     ## Base type for all handles.
@@ -41,7 +44,8 @@ proc `writeBufferSize=`*(handle: Handle; size: cint) =
     doAssert size > 0
     checkError uv_send_buffer_size(handle.handle.handle, addr size)
 
-proc `=destroy`(x: HandleHolder) =
+proc `=destroy`(x: HandleHolderObj) =
+    echo "destroying handle"
     proc onClose(handle: ptr uv_handle_t) {.cdecl.} =
         dealloc(handle)
 
